@@ -1,0 +1,19 @@
+{
+  "name": "planq",
+  "version": "0.0.0-reserved.0",
+  "description": "Reserved package identity for the PlanQ command-line interface.",
+  "license": "UNLICENSED",
+  "homepage": "https://planq.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/planq-cli/plan-releases.git",
+    "directory": "npm/planq"
+  },
+  "files": [
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "tag": "reserved"
+  }
+}
