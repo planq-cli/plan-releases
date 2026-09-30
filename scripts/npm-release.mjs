@@ -136,6 +136,7 @@ async function isolatedNpmEnvironment(root, environment = process.env) {
     NPM_CONFIG_PREFIX: prefix,
     NPM_CONFIG_REGISTRY: registry,
     NPM_CONFIG_USERCONFIG: userconfig,
+    PLAN_SITE: "",
     PATH: `${path.join(prefix, "bin")}${path.delimiter}${environment.PATH ?? ""}`,
   });
 }
@@ -614,8 +615,25 @@ async function exercisePlanq({
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
+  let stdout = "";
+  let stderr = "";
+  child.stdout?.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr?.on("data", (chunk) => {
+    stderr += chunk;
+  });
   try {
-    await waitForDev(port, child);
+    try {
+      await waitForDev(port, child);
+    } catch (error) {
+      error.details = {
+        ...(error.details ?? {}),
+        stdout: sanitize(stdout, root, env),
+        stderr: sanitize(stderr, root, env),
+      };
+      throw error;
+    }
   } finally {
     await stopDev(child);
   }
