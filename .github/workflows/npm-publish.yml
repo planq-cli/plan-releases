@@ -121,6 +121,16 @@ jobs:
           path: ${{ runner.temp }}/bundle
           if-no-files-found: error
           retention-days: 7
+      - name: Upload prepare evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-prepare-evidence-${{ steps.release.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/bundle/publication/npm-publication-v1.json
+            ${{ runner.temp }}/bundle/local-tarball-smoke-v1.json
+            ${{ runner.temp }}/bundle/npm-preflight-v1.json
+          if-no-files-found: error
+          retention-days: 90
 
   publish:
     name: publish / npm-production
