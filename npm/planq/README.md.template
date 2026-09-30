@@ -1,0 +1,39 @@
+# PlanQ CLI
+
+PlanQ is a Git-native planning DSL, validator, formatter, and read-only Gantt
+tool.
+
+This npm package supports Linux glibc x86_64 and requires Node.js 20 or newer.
+Use [Homebrew on macOS arm64](https://planq.dev/docs/install) or
+[winget on Windows x86_64](https://planq.dev/docs/install).
+
+## Install
+
+```bash
+npm install --global @planq-cli/planq@@@VERSION@@
+planq version
+```
+
+Run without a global install:
+
+```bash
+npx @planq-cli/planq@@@VERSION@@ version
+```
+
+## Quickstart
+
+```bash
+planq init project.plan --id demo --name "Demo"
+planq validate project.plan
+planq dev project.plan
+```
+
+Continue with the
+[five-minute Quickstart](https://planq.dev/docs/quickstart) or review
+[installation and supported platforms](https://planq.dev/docs/install).
+
+Do not install with `--no-optional`; the wrapper requires the exact matching
+`@planq-cli/linux-x64` package. Linux musl/Alpine, Linux arm64, macOS, and
+Windows are not supported by this npm package.
+
+PlanQ is licensed under `@@LICENSE@@`.

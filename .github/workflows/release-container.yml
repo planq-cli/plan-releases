@@ -10,34 +10,17 @@ jobs:
   policy:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: "24"
-      - name: Reject generated release payloads in Git
-        shell: bash
+          node-version: "22.14.0"
+      - name: Validate release repository boundary
         run: |
-          set -euo pipefail
-          if git ls-files -z |
-            grep -zE '(^|/)(target|dist)/|planq-[0-9].*\.(tar\.gz|zip)$|(^|/)bin/planq$'
-          then
-            echo "generated release payloads must remain in immutable Release assets" >&2
-            exit 1
-          fi
-      - name: Check public release tooling
+          node scripts/validate-repository.mjs
+      - name: Check public release tooling syntax
         run: |
+          node --check scripts/download-release.mjs
           node --check scripts/prepare-npm.mjs
+          node --check scripts/npm-release.mjs
+          node --check scripts/validate-repository.mjs
           node --check npm/planq/bin/planq.js
-      - name: Enforce private npm publication boundary
-        shell: bash
-        run: |
-          set -euo pipefail
-          for workflow in \
-            .github/workflows/publish-platform-packages.yml \
-            .github/workflows/publish-npm.yml
-          do
-            if test -e "$workflow"; then
-              echo "npm publication must run in the private release controller: $workflow" >&2
-              exit 1
-            fi
-          done
