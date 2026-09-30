@@ -30,6 +30,24 @@ const targets = {
   "windows-x86_64": "windows-x86_64.zip",
 };
 const maxArchiveEntry = 128 * 1024 * 1024;
+const publicationManifestName = "npm-publication-v1.json";
+const packageContracts = [
+  {
+    directory: "linux-x64",
+    name: "@planq-cli/linux-x64",
+    files: [
+      "LICENSE",
+      "bin/planq",
+      "package.json",
+      "planq-release-v1.json",
+    ],
+  },
+  {
+    directory: "planq",
+    name: "@planq-cli/planq",
+    files: ["LICENSE", "README.md", "bin/planq.js", "package.json"],
+  },
+];
 
 function fail(message, details = {}) {
   const error = new Error(message);
@@ -206,6 +224,121 @@ function packageJson(value) {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
 
+function runNpmPack(packageDirectory, destination, npmRunner) {
+  const result = npmRunner(
+    "npm",
+    [
+      "pack",
+      packageDirectory,
+      "--json",
+      "--ignore-scripts",
+      "--pack-destination",
+      destination,
+    ],
+    {
+      cwd: destination,
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
+  if (result.status !== 0) {
+    fail("npm pack failed", {
+      package: path.basename(packageDirectory),
+      status: result.status,
+      stderr: String(result.stderr ?? "").trim().slice(-4000),
+    });
+  }
+  let reports;
+  try {
+    reports = JSON.parse(result.stdout);
+  } catch {
+    fail("npm pack returned invalid JSON");
+  }
+  if (!Array.isArray(reports) || reports.length !== 1) {
+    fail("npm pack returned an invalid report");
+  }
+  return reports[0];
+}
+
+async function packNpmPackages({
+  staging,
+  release,
+  npmRunner,
+}) {
+  const first = path.join(staging, ".pack-first");
+  const second = path.join(staging, ".pack-second");
+  const artifacts = path.join(staging, "artifacts");
+  await Promise.all([
+    mkdir(first, { recursive: true }),
+    mkdir(second, { recursive: true }),
+    mkdir(artifacts, { recursive: true }),
+  ]);
+
+  const packages = [];
+  for (const contract of packageContracts) {
+    const packageDirectory = path.join(staging, contract.directory);
+    const firstReport = runNpmPack(packageDirectory, first, npmRunner);
+    const secondReport = runNpmPack(packageDirectory, second, npmRunner);
+    const actualFiles = firstReport.files
+      ?.map((entry) => entry.path)
+      .sort();
+    if (
+      firstReport.filename !== secondReport.filename ||
+      JSON.stringify(actualFiles) !== JSON.stringify(contract.files)
+    ) {
+      fail("npm tarball contract is invalid", {
+        package: contract.name,
+        actualFiles,
+        expectedFiles: contract.files,
+      });
+    }
+    const firstTarball = await readFile(
+      path.join(first, firstReport.filename),
+    );
+    const secondTarball = await readFile(
+      path.join(second, secondReport.filename),
+    );
+    const digest = sha256(firstTarball);
+    if (digest !== sha256(secondTarball)) {
+      fail("npm pack output is not deterministic", {
+        package: contract.name,
+      });
+    }
+    await write(artifacts, firstReport.filename, firstTarball);
+    packages.push({
+      name: contract.name,
+      version: release.manifest.productVersion,
+      file: firstReport.filename,
+      sha256: digest,
+    });
+  }
+
+  const releaseManifest = await readFile(
+    path.join(release.root, "planq-release-v1.json"),
+  );
+  const publicationManifest = {
+    schemaVersion: "1",
+    productVersion: release.manifest.productVersion,
+    release: {
+      tag: `v${release.manifest.productVersion}`,
+      sourceCommit: release.manifest.sourceCommit,
+      sourceSnapshotSha256: release.manifest.sourceSnapshotSha256,
+      manifestSha256: sha256(releaseManifest),
+      skillDigest: release.manifest.skill.digest,
+      target: "linux-x86_64",
+    },
+    packages,
+  };
+  await write(
+    staging,
+    publicationManifestName,
+    `${JSON.stringify(publicationManifest, null, 2)}\n`,
+  );
+  await rm(first, { recursive: true, force: true });
+  await rm(second, { recursive: true, force: true });
+  return publicationManifest;
+}
+
 async function wrapperReadme(version, license) {
   const rendered = (await readFile(wrapperReadmeSource, "utf8"))
     .replaceAll("@@VERSION@@", version)
@@ -227,6 +360,7 @@ export async function prepareNpmPackages({
   releaseDirectory,
   outputDirectory,
   metadataPath = defaultMetadata,
+  npmRunner = spawnSync,
 }) {
   const release = await loadRelease(releaseDirectory);
   const metadata = validateMetadata(
@@ -314,15 +448,25 @@ export async function prepareNpmPackages({
       "linux-x64/planq-release-v1.json",
       `${JSON.stringify(release.manifest)}\n`,
     );
+    const publicationManifest = await packNpmPackages({
+      staging,
+      release,
+      npmRunner,
+    });
     await rm(output, { recursive: true, force: true });
     await mkdir(path.dirname(output), { recursive: true });
     await rename(staging, output);
+    return {
+      version,
+      outputDirectory: output,
+      tarballsDirectory: path.join(output, "artifacts"),
+      publicationManifestPath: path.join(output, publicationManifestName),
+      publicationManifest,
+    };
   } catch (error) {
     await rm(staging, { recursive: true, force: true });
     throw error;
   }
-
-  return { version, outputDirectory: output };
 }
 
 function parseArguments(argv) {

@@ -1,0 +1,6 @@
+{
+  "description": "Git-native planning DSL, validation, formatting, and read-only Gantt tooling",
+  "homepage": "https://planq.dev",
+  "license": "PolyForm-Noncommercial-1.0.0",
+  "repository": "https://github.com/planq-cli/plan-releases"
+}
