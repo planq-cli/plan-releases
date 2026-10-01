@@ -7,16 +7,14 @@ the product source code.
 ## Install
 
 The shared npm command supports macOS arm64, Linux glibc x86_64, and Windows
-x86_64 starting with the first cross-platform npm release:
+x86_64:
 
 ```bash
 npm install --global @planq-cli/planq
 planq version
 ```
 
-The current npm `latest`, `0.1.3`, remains Linux-only. Cross-platform npm is
-pending public release and three-platform registry acceptance; check the
-installation page before using npm on macOS or Windows.
+The current npm `latest`, `0.1.4`, is available on all three supported targets.
 
 The installed PlanQ binary is native and does not require GraalVM, a JDK, or
 Clojure. Homebrew on macOS and winget on Windows remain optional native
