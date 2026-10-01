@@ -79,6 +79,22 @@ function exactKeys(value, keys, label) {
   }
 }
 
+export function sameStringMap(actual, expected) {
+  if (
+    actual === null ||
+    typeof actual !== "object" ||
+    Array.isArray(actual)
+  ) {
+    return false;
+  }
+  const actualKeys = Object.keys(actual).sort();
+  const expectedKeys = Object.keys(expected).sort();
+  return (
+    JSON.stringify(actualKeys) === JSON.stringify(expectedKeys) &&
+    expectedKeys.every((key) => actual[key] === expected[key])
+  );
+}
+
 function parseVersion(value) {
   const match = /^v?([0-9]+)\.([0-9]+)\.([0-9]+)$/.exec(value ?? "");
   return match ? match.slice(1).map(Number) : null;
@@ -932,10 +948,14 @@ async function verifyOnce(publication, fetchImpl) {
   if (
     wrapper.definition.bin?.planq !== "bin/planq.js" ||
     wrapper.definition.engines?.node !== ">=20" ||
-    JSON.stringify(wrapper.definition.optionalDependencies) !==
-      JSON.stringify(expectedDependencies)
+    !sameStringMap(
+      wrapper.definition.optionalDependencies,
+      expectedDependencies,
+    )
   ) {
-    fail("published npm package metadata contract mismatch");
+    fail("published npm package metadata contract mismatch", {
+      package: wrapper.name,
+    });
   }
   return inspected;
 }
