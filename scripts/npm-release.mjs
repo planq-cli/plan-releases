@@ -167,15 +167,20 @@ async function isolatedNpmEnvironment(root, environment = process.env) {
   });
 }
 
+function npmExecutable(platform = process.platform) {
+  return platform === "win32" ? "npm.cmd" : "npm";
+}
+
 export function assertToolchain({
   commandRunner = spawnSync,
   nodeVersion = process.versions.node,
   environment = process.env,
+  platform = process.platform,
 } = {}) {
   if (!versionAtLeast(nodeVersion, "22.14.0")) {
     fail("Node.js >=22.14.0 is required", { actual: nodeVersion });
   }
-  const result = commandRunner("npm", ["--version"], {
+  const result = commandRunner(npmExecutable(platform), ["--version"], {
     encoding: "utf8",
     env: cleanEnvironment(environment),
     windowsHide: true,
@@ -441,7 +446,7 @@ export async function publishFromManifest({
         if (state?.status !== "absent") continue;
         run(
           commandRunner,
-          "npm",
+          npmExecutable(),
           publicationCommand(item),
           {
             cwd: root,
@@ -772,7 +777,7 @@ export async function smokeLocalTarballs({
     const wrapper = publication.packages.at(-1);
     run(
       commandRunner,
-      "npm",
+      npmExecutable(),
       [
         "install",
         "--global",
@@ -807,7 +812,7 @@ export async function smokeLocalTarballs({
       "local tarball npx",
       run(
         commandRunner,
-        "npm",
+        npmExecutable(),
         [
           "exec",
           "--yes",
@@ -826,7 +831,7 @@ export async function smokeLocalTarballs({
     }
     run(
       commandRunner,
-      "npm",
+      npmExecutable(),
       [
         "uninstall",
         "--global",
@@ -966,7 +971,7 @@ export async function verifyRegistryPublication({
     const version = publication.manifest.productVersion;
     run(
       commandRunner,
-      "npm",
+      npmExecutable(),
       [
         "install",
         "--global",
@@ -999,7 +1004,7 @@ export async function verifyRegistryPublication({
       "registry npx",
       run(
         commandRunner,
-        "npm",
+        npmExecutable(),
         [
           "exec",
           "--yes",
@@ -1017,7 +1022,7 @@ export async function verifyRegistryPublication({
     }
     run(
       commandRunner,
-      "npm",
+      npmExecutable(),
       [
         "uninstall",
         "--global",
