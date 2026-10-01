@@ -729,9 +729,9 @@ async function installedPlanq(prefix, commandRunner, env, root) {
   }
   const output = run(
     commandRunner,
-    process.env.ComSpec ?? "cmd.exe",
-    ["/d", "/s", "/c", `"${shim}" version`],
-    { cwd: root, env, root, sourceEnvironment: env },
+    shim,
+    ["version"],
+    { cwd: root, env, root, sourceEnvironment: env, shell: true },
     "planq.cmd version",
   );
   jsonOutput("planq.cmd version", output);
