@@ -764,11 +764,26 @@ async function installedPlanq(prefix, commandRunner, env, root) {
   };
 }
 
-async function assertPlatformPackages(prefix, expected) {
-  const scope = path.join(globalPackageRoot(prefix), "@planq-cli");
+export async function assertPlatformPackages(prefix, expected) {
+  const packageRoot = globalPackageRoot(prefix);
+  const scopes = [
+    path.join(packageRoot, "@planq-cli"),
+    path.join(
+      packageRoot,
+      "@planq-cli",
+      "planq",
+      "node_modules",
+      "@planq-cli",
+    ),
+  ];
   for (const contract of nativeContracts) {
-    const packagePath = path.join(scope, contract.name.split("/")[1]);
-    const present = Boolean(await lstat(packagePath).catch(() => null));
+    const packageName = contract.name.split("/")[1];
+    const locations = await Promise.all(
+      scopes.map((scope) =>
+        lstat(path.join(scope, packageName)).catch(() => null)
+      ),
+    );
+    const present = locations.some(Boolean);
     if (present !== (contract.name === expected.name)) {
       fail("npm installed an unexpected platform package", {
         expected: expected.name,
