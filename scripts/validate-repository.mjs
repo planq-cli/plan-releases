@@ -103,6 +103,7 @@ export function validateNpmWorkflow(workflow) {
   for (const [block, required] of [
     [smoke, /name:\s*smoke \/ \$\{\{ matrix\.target \}\}/],
     [verify, /name:\s*anonymous verify \/ \$\{\{ matrix\.target \}\}/],
+    [verify, /name:\s*Verify anonymous npm publication\s+shell:\s*bash/],
     [publish, /needs:\s*\n\s+- prepare\s*\n\s+- smoke/],
     [publish, /if:\s*needs\.prepare\.outputs\.dry-run != 'true'/],
   ]) {
