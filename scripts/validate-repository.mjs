@@ -66,11 +66,13 @@ export function validateNpmWorkflow(workflow) {
   ) {
     fail("npm workflow global controls are incomplete");
   }
-  const prepare = jobBlock(workflow, "prepare", "publish");
+  const prepare = jobBlock(workflow, "prepare", "smoke");
+  const smoke = jobBlock(workflow, "smoke", "publish");
   const publish = jobBlock(workflow, "publish", "verify");
   const verify = jobBlock(workflow, "verify");
   if (
     /id-token:\s*write/.test(prepare) ||
+    /id-token:\s*write/.test(smoke) ||
     /id-token:\s*write/.test(verify) ||
     !/id-token:\s*write/.test(publish) ||
     !/environment:\s*npm-production/.test(publish)
@@ -84,6 +86,30 @@ export function validateNpmWorkflow(workflow) {
     /(?:PLANQ_NPM_TOKEN|NODE_AUTH_TOKEN|NPM_TOKEN|secrets\.)/.test(workflow)
   ) {
     fail("npm workflow must not reference npm secrets");
+  }
+  for (const block of [smoke, verify]) {
+    for (const required of [
+      /target:\s*darwin-arm64\s+runner:\s*macos-14/,
+      /target:\s*linux-x86_64\s+runner:\s*ubuntu-24\.04/,
+      /target:\s*windows-x86_64\s+runner:\s*windows-2022/,
+    ]) {
+      if (!required.test(block)) {
+        fail("npm workflow native matrix is incomplete", {
+          required: String(required),
+        });
+      }
+    }
+  }
+  for (const [block, required] of [
+    [smoke, /name:\s*smoke \/ \$\{\{ matrix\.target \}\}/],
+    [verify, /name:\s*anonymous verify \/ \$\{\{ matrix\.target \}\}/],
+    [publish, /needs:\s*\n\s+- prepare\s*\n\s+- smoke/],
+  ]) {
+    if (!required.test(block)) {
+      fail("npm workflow native matrix is incomplete", {
+        required: String(required),
+      });
+    }
   }
   const actions = [...workflow.matchAll(/uses:\s*([^@\s]+)@([^\s#]+)/g)];
   if (
@@ -107,7 +133,7 @@ export function validateNpmWorkflow(workflow) {
   }
   return {
     schemaVersion: "1",
-    jobs: ["prepare", "publish", "verify"],
+    jobs: ["prepare", "smoke", "publish", "verify"],
     actions: actions.map(([, name, reference]) => ({ name, reference })),
   };
 }
