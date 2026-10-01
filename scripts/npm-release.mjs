@@ -21,9 +21,34 @@ import { pathToFileURL } from "node:url";
 const registry = "https://registry.npmjs.org";
 const manifestName = "npm-publication-v1.json";
 const packageContracts = [
-  { name: "@planq-cli/linux-x64", kind: "native" },
+  {
+    name: "@planq-cli/darwin-arm64",
+    kind: "native",
+    target: "darwin-arm64",
+    platform: "darwin",
+    arch: "arm64",
+    binary: "planq",
+  },
+  {
+    name: "@planq-cli/linux-x64",
+    kind: "native",
+    target: "linux-x86_64",
+    platform: "linux",
+    arch: "x64",
+    libc: "glibc",
+    binary: "planq",
+  },
+  {
+    name: "@planq-cli/win32-x64",
+    kind: "native",
+    target: "windows-x86_64",
+    platform: "win32",
+    arch: "x64",
+    binary: "planq.exe",
+  },
   { name: "@planq-cli/planq", kind: "wrapper" },
 ];
+const nativeContracts = packageContracts.filter(({ kind }) => kind === "native");
 const npmCredentialNames = [
   "NODE_AUTH_TOKEN",
   "NPM_TOKEN",
@@ -130,6 +155,7 @@ async function isolatedNpmEnvironment(root, environment = process.env) {
     `registry=${registry}/\nalways-auth=false\n`,
     { mode: 0o600 },
   );
+  const globalBin = process.platform === "win32" ? prefix : path.join(prefix, "bin");
   return cleanEnvironment(environment, {
     HOME: home,
     NPM_CONFIG_CACHE: cache,
@@ -137,7 +163,7 @@ async function isolatedNpmEnvironment(root, environment = process.env) {
     NPM_CONFIG_REGISTRY: registry,
     NPM_CONFIG_USERCONFIG: userconfig,
     PLAN_SITE: "",
-    PATH: `${path.join(prefix, "bin")}${path.delimiter}${environment.PATH ?? ""}`,
+    PATH: `${globalBin}${path.delimiter}${environment.PATH ?? ""}`,
   });
 }
 
@@ -186,7 +212,7 @@ export async function loadPublication(directory) {
       "sourceSnapshotSha256",
       "manifestSha256",
       "skillDigest",
-      "target",
+      "targets",
     ],
     "publication release identity",
   );
@@ -198,7 +224,8 @@ export async function loadPublication(directory) {
     !/^[0-9a-f]{64}$/.test(manifest.release.sourceSnapshotSha256) ||
     !/^[0-9a-f]{64}$/.test(manifest.release.manifestSha256) ||
     !/^sha256:[0-9a-f]{64}$/.test(manifest.release.skillDigest) ||
-    manifest.release.target !== "linux-x86_64" ||
+    JSON.stringify(manifest.release.targets) !==
+      JSON.stringify(nativeContracts.map(({ target }) => target)) ||
     !Array.isArray(manifest.packages) ||
     manifest.packages.length !== packageContracts.length
   ) {
@@ -290,13 +317,15 @@ async function inspectRegistryPackage(item, version, fetchImpl) {
     });
   }
   const digest = sha256(Buffer.from(await response.arrayBuffer()));
+  const provenance = hasProvenance(definition);
   return {
     name: item.name,
-    status: digest === item.sha256 ? "matching" : "conflict",
+    status:
+      digest !== item.sha256 ? "conflict" : provenance ? "matching" : "legacy",
     reason: digest === item.sha256 ? null : "tarball-digest",
     latest: metadata["dist-tags"]?.latest ?? null,
     definition,
-    provenance: hasProvenance(definition),
+    provenance,
     sha256: digest,
   };
 }
@@ -316,29 +345,32 @@ export async function classifyRegistryState({
       ),
     );
   }
-  const [native, wrapper] = inspected;
+  const natives = inspected.slice(0, nativeContracts.length);
+  const wrapper = inspected.at(-1);
+  const matchingNatives = natives.filter(
+    ({ status }) => status === "matching",
+  );
+  const absentNatives = natives.filter(({ status }) => status === "absent");
   let state;
-  if (native.status === "absent" && wrapper.status === "absent") {
-    state = "new";
+  if (inspected.some(({ status }) => status === "conflict")) {
+    state = "conflict";
+  } else if (inspected.some(({ status }) => status === "legacy")) {
+    state = "legacy-no-provenance";
   } else if (
-    native.status === "matching" &&
-    native.provenance &&
-    wrapper.status === "absent"
-  ) {
-    state = "resume-wrapper";
-  } else if (
-    native.status === "matching" &&
     wrapper.status === "matching" &&
-    native.provenance &&
-    wrapper.provenance
+    matchingNatives.length === nativeContracts.length
   ) {
     state = "existing";
+  } else if (wrapper.status !== "absent") {
+    state = "conflict";
+  } else if (absentNatives.length === nativeContracts.length) {
+    state = "new";
+  } else if (matchingNatives.length === nativeContracts.length) {
+    state = "resume-wrapper";
   } else if (
-    native.status === "matching" &&
-    wrapper.status === "matching" &&
-    (!native.provenance || !wrapper.provenance)
+    matchingNatives.length + absentNatives.length === nativeContracts.length
   ) {
-    state = "legacy-no-provenance";
+    state = "resume-native";
   } else {
     state = "conflict";
   }
@@ -399,9 +431,14 @@ export async function publishFromManifest({
   const root = await mkdtemp(path.join(os.tmpdir(), "planq-npm-publish-"));
   try {
     const env = await isolatedNpmEnvironment(root, environment);
-    const startIndex = preflight.state === "resume-wrapper" ? 1 : 0;
-    if (preflight.state === "new" || preflight.state === "resume-wrapper") {
-      for (const item of publication.packages.slice(startIndex)) {
+    const publishable = new Set(["new", "resume-native", "resume-wrapper"]);
+    const published = [];
+    if (publishable.has(preflight.state)) {
+      for (const item of publication.packages) {
+        const state = preflight.packages.find(
+          ({ name }) => name === item.name,
+        );
+        if (state?.status !== "absent") continue;
         run(
           commandRunner,
           "npm",
@@ -414,6 +451,7 @@ export async function publishFromManifest({
           },
           `publish ${item.name}`,
         );
+        published.push(item.name);
       }
     }
     return {
@@ -421,13 +459,7 @@ export async function publishFromManifest({
       action: preflight.state === "existing" ? "verify-only" : "publish",
       productVersion: publication.manifest.productVersion,
       state: preflight.state,
-      published: publication.packages
-        .slice(
-          preflight.state === "existing"
-            ? publication.packages.length
-            : startIndex,
-        )
-        .map(({ name }) => name),
+      published,
       toolchain,
     };
   } finally {
@@ -513,8 +545,15 @@ async function treeDigest(root, relative = "") {
   return hash.digest("hex");
 }
 
+function planqInvocation(binary, args) {
+  return process.platform === "win32" && binary.endsWith(".js")
+    ? [process.execPath, [binary, ...args]]
+    : [binary, args];
+}
+
 async function exercisePlanq({
   binary,
+  expectedTarget,
   publication,
   root,
   env,
@@ -529,9 +568,10 @@ async function exercisePlanq({
     env,
     root,
   }, "git init");
+  const [versionCommand, versionArgs] = planqInvocation(binary, ["version"]);
   const version = jsonOutput(
     "planq version",
-    run(commandRunner, binary, ["version"], {
+    run(commandRunner, versionCommand, versionArgs, {
       cwd: project,
       env,
       root,
@@ -542,39 +582,33 @@ async function exercisePlanq({
     version.command !== "version" ||
     version.result?.productVersion !== publication.manifest.productVersion ||
     version.result?.sourceCommit !== publication.manifest.release.sourceCommit ||
-    version.result?.buildTarget !== publication.manifest.release.target ||
+    version.result?.buildTarget !== expectedTarget ||
     version.result?.skill?.digest !== publication.manifest.release.skillDigest
   ) {
     fail("planq version does not match publication manifest");
   }
   if (!includeFullSmoke) return;
 
+  const invoke = (args, label) => {
+    const [command, commandArgs] = planqInvocation(binary, args);
+    return run(commandRunner, command, commandArgs, {
+      cwd: project,
+      env,
+      root,
+    }, label);
+  };
   const missing = jsonOutput(
     "planq skill status",
-    run(commandRunner, binary, ["skill", "status"], {
-      cwd: project,
-      env,
-      root,
-    }, "planq skill status"),
+    invoke(["skill", "status"], "planq skill status"),
   );
   if (missing.result?.status !== "missing") fail("expected missing project Skill");
-  run(commandRunner, binary, ["skill", "install"], {
-    cwd: project,
-    env,
-    root,
-  }, "planq skill install");
+  invoke(["skill", "install"], "planq skill install");
   const current = jsonOutput(
     "planq skill status",
-    run(commandRunner, binary, ["skill", "status"], {
-      cwd: project,
-      env,
-      root,
-    }, "planq skill status"),
+    invoke(["skill", "status"], "planq skill status"),
   );
   if (current.result?.status !== "current") fail("project Skill is not current");
-  run(
-    commandRunner,
-    binary,
+  invoke(
     [
       "init",
       "project.plan",
@@ -583,7 +617,6 @@ async function exercisePlanq({
       "--name",
       "Npm Smoke",
     ],
-    { cwd: project, env, root },
     "planq init",
   );
   await writeFile(
@@ -597,17 +630,20 @@ async function exercisePlanq({
     ["format", "--check", "project.plan"],
     ["project", "validate"],
   ]) {
-    run(commandRunner, binary, args, {
-      cwd: project,
-      env,
-      root,
-    }, `planq ${args.join(" ")}`);
+    invoke(args, `planq ${args.join(" ")}`);
   }
 
   const port = await unusedPort();
+  const [devCommand, devArgs] = planqInvocation(binary, [
+    "dev",
+    "project.plan",
+    "--port",
+    String(port),
+    "--no-open",
+  ]);
   const child = devRunner(
-    binary,
-    ["dev", "project.plan", "--port", String(port), "--no-open"],
+    devCommand,
+    devArgs,
     {
       cwd: project,
       env,
@@ -646,10 +682,77 @@ async function exercisePlanq({
   if (stale) fail("planq dev left a stale discovery file");
 }
 
-function assertLinuxHost() {
-  const glibc = process.report?.getReport?.().header?.glibcVersionRuntime;
-  if (process.platform !== "linux" || process.arch !== "x64" || !glibc) {
-    fail("npm package smoke requires Linux glibc x86_64");
+function currentNativeContract() {
+  const contract = nativeContracts.find(
+    ({ platform, arch }) =>
+      platform === process.platform && arch === process.arch,
+  );
+  if (
+    !contract ||
+    (contract.libc === "glibc" &&
+      !process.report?.getReport?.().header?.glibcVersionRuntime)
+  ) {
+    fail("npm package smoke requires a supported native host", {
+      platform: process.platform,
+      arch: process.arch,
+    });
+  }
+  return contract;
+}
+
+function globalPackageRoot(prefix) {
+  return process.platform === "win32"
+    ? path.join(prefix, "node_modules")
+    : path.join(prefix, "lib", "node_modules");
+}
+
+async function installedPlanq(prefix, commandRunner, env, root) {
+  if (process.platform !== "win32") {
+    const binary = path.join(prefix, "bin", "planq");
+    const stats = await lstat(binary).catch(() => null);
+    if (!stats?.isSymbolicLink()) {
+      fail("npm global install did not create the planq symlink");
+    }
+    return { binary, commandKind: "symlink" };
+  }
+  const shim = path.join(prefix, "planq.cmd");
+  const stats = await lstat(shim).catch(() => null);
+  if (!stats?.isFile()) {
+    fail("npm global install did not create the planq.cmd shim");
+  }
+  const output = run(
+    commandRunner,
+    process.env.ComSpec ?? "cmd.exe",
+    ["/d", "/s", "/c", `"${shim}" version`],
+    { cwd: root, env, root, sourceEnvironment: env },
+    "planq.cmd version",
+  );
+  jsonOutput("planq.cmd version", output);
+  return {
+    binary: path.join(
+      globalPackageRoot(prefix),
+      "@planq-cli",
+      "planq",
+      "bin",
+      "planq.js",
+    ),
+    shim,
+    commandKind: "cmd-shim",
+  };
+}
+
+async function assertPlatformPackages(prefix, expected) {
+  const scope = path.join(globalPackageRoot(prefix), "@planq-cli");
+  for (const contract of nativeContracts) {
+    const packagePath = path.join(scope, contract.name.split("/")[1]);
+    const present = Boolean(await lstat(packagePath).catch(() => null));
+    if (present !== (contract.name === expected.name)) {
+      fail("npm installed an unexpected platform package", {
+        expected: expected.name,
+        package: contract.name,
+        present,
+      });
+    }
   }
 }
 
@@ -659,13 +762,14 @@ export async function smokeLocalTarballs({
   commandRunner = spawnSync,
   devRunner = spawn,
 }) {
-  assertLinuxHost();
+  const host = currentNativeContract();
   const toolchain = assertToolchain({ commandRunner, environment });
   const publication = await loadPublication(directory);
   const root = await mkdtemp(path.join(os.tmpdir(), "planq-npm-smoke-"));
   try {
     const env = await isolatedNpmEnvironment(root, environment);
-    const [native, wrapper] = publication.packages;
+    const native = publication.packages.find(({ name }) => name === host.name);
+    const wrapper = publication.packages.at(-1);
     run(
       commandRunner,
       "npm",
@@ -681,13 +785,16 @@ export async function smokeLocalTarballs({
       { cwd: root, env, root, sourceEnvironment: environment },
       "local tarball global install",
     );
-    const binary = path.join(env.NPM_CONFIG_PREFIX, "bin", "planq");
-    const stats = await lstat(binary).catch(() => null);
-    if (!stats?.isSymbolicLink()) {
-      fail("npm global install did not create the planq symlink");
-    }
+    await assertPlatformPackages(env.NPM_CONFIG_PREFIX, host);
+    const installed = await installedPlanq(
+      env.NPM_CONFIG_PREFIX,
+      commandRunner,
+      env,
+      root,
+    );
     await exercisePlanq({
-      binary,
+      binary: installed.binary,
+      expectedTarget: host.target,
       publication,
       root,
       env,
@@ -727,12 +834,13 @@ export async function smokeLocalTarballs({
         "--no-audit",
         "--no-fund",
         "@planq-cli/planq",
-        "@planq-cli/linux-x64",
+        host.name,
       ],
       { cwd: root, env, root, sourceEnvironment: environment },
       "local tarball uninstall",
     );
-    if (await lstat(binary).catch(() => null)) {
+    const commandPath = installed.shim ?? installed.binary;
+    if (await lstat(commandPath).catch(() => null)) {
       fail("npm uninstall retained the planq executable");
     }
     const after = await treeDigest(path.join(root, "project"));
@@ -741,10 +849,12 @@ export async function smokeLocalTarballs({
       schemaVersion: "1",
       action: "local-tarball-smoke",
       productVersion: publication.manifest.productVersion,
+      target: host.target,
       toolchain,
       checks: [
         "tarball-digest",
-        "global-symlink",
+        `global-${installed.commandKind}`,
+        "platform-package-filter",
         "version",
         "skill",
         "init",
@@ -774,7 +884,6 @@ async function verifyOnce(publication, fetchImpl) {
       ),
     );
   }
-  const [native, wrapper] = inspected;
   for (const item of inspected) {
     if (
       item.status !== "matching" ||
@@ -792,13 +901,32 @@ async function verifyOnce(publication, fetchImpl) {
       });
     }
   }
+  for (let index = 0; index < nativeContracts.length; index += 1) {
+    const contract = nativeContracts[index];
+    const definition = inspected[index].definition;
+    if (
+      JSON.stringify(definition.os) !== JSON.stringify([contract.platform]) ||
+      JSON.stringify(definition.cpu) !== JSON.stringify([contract.arch]) ||
+      JSON.stringify(definition.libc) !==
+        JSON.stringify(contract.libc ? [contract.libc] : undefined)
+    ) {
+      fail("published npm package metadata contract mismatch", {
+        package: contract.name,
+      });
+    }
+  }
+  const wrapper = inspected.at(-1);
+  const expectedDependencies = Object.fromEntries(
+    nativeContracts.map(({ name }) => [
+      name,
+      publication.manifest.productVersion,
+    ]),
+  );
   if (
-    JSON.stringify(native.definition.os) !== '["linux"]' ||
-    JSON.stringify(native.definition.cpu) !== '["x64"]' ||
-    JSON.stringify(native.definition.libc) !== '["glibc"]' ||
     wrapper.definition.bin?.planq !== "bin/planq.js" ||
-    wrapper.definition.optionalDependencies?.["@planq-cli/linux-x64"] !==
-      publication.manifest.productVersion
+    wrapper.definition.engines?.node !== ">=20" ||
+    JSON.stringify(wrapper.definition.optionalDependencies) !==
+      JSON.stringify(expectedDependencies)
   ) {
     fail("published npm package metadata contract mismatch");
   }
@@ -813,7 +941,7 @@ export async function verifyRegistryPublication({
   attempts = 24,
   retryDelayMs = 5000,
 }) {
-  assertLinuxHost();
+  const host = currentNativeContract();
   const toolchain = assertToolchain({ commandRunner, environment });
   const publication = await loadPublication(directory);
   let inspected;
@@ -850,13 +978,16 @@ export async function verifyRegistryPublication({
       { cwd: root, env, root, sourceEnvironment: environment },
       "registry global install",
     );
-    const binary = path.join(env.NPM_CONFIG_PREFIX, "bin", "planq");
-    const stats = await lstat(binary).catch(() => null);
-    if (!stats?.isSymbolicLink()) {
-      fail("registry install did not create the planq symlink");
-    }
+    await assertPlatformPackages(env.NPM_CONFIG_PREFIX, host);
+    const installed = await installedPlanq(
+      env.NPM_CONFIG_PREFIX,
+      commandRunner,
+      env,
+      root,
+    );
     await exercisePlanq({
-      binary,
+      binary: installed.binary,
+      expectedTarget: host.target,
       publication,
       root,
       env,
@@ -898,10 +1029,15 @@ export async function verifyRegistryPublication({
       { cwd: root, env, root, sourceEnvironment: environment },
       "registry uninstall",
     );
+    const commandPath = installed.shim ?? installed.binary;
+    if (await lstat(commandPath).catch(() => null)) {
+      fail("npm registry uninstall retained the planq executable");
+    }
     return {
       schemaVersion: "1",
       action: "anonymous-verify",
       productVersion: version,
+      target: host.target,
       publicationManifestSha256: publication.manifestSha256,
       toolchain,
       packages: inspected.map((item) => ({
@@ -916,7 +1052,8 @@ export async function verifyRegistryPublication({
         "provenance",
         "tarball-digest",
         "exact-native-dependency",
-        "global-symlink",
+        `global-${installed.commandKind}`,
+        "platform-package-filter",
         "version",
         "npx",
         "uninstall",

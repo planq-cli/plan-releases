@@ -29,19 +29,49 @@ const targets = {
   "linux-x86_64": "linux-x86_64.tar.gz",
   "windows-x86_64": "windows-x86_64.zip",
 };
+const nativeTargets = [
+  {
+    target: "darwin-arm64",
+    directory: "darwin-arm64",
+    name: "@planq-cli/darwin-arm64",
+    binary: "planq",
+    description: "PlanQ native CLI for macOS arm64",
+    os: ["darwin"],
+    cpu: ["arm64"],
+  },
+  {
+    target: "linux-x86_64",
+    directory: "linux-x64",
+    name: "@planq-cli/linux-x64",
+    binary: "planq",
+    description: "PlanQ native CLI for Linux glibc x86_64",
+    os: ["linux"],
+    cpu: ["x64"],
+    libc: ["glibc"],
+  },
+  {
+    target: "windows-x86_64",
+    directory: "win32-x64",
+    name: "@planq-cli/win32-x64",
+    binary: "planq.exe",
+    description: "PlanQ native CLI for Windows x86_64",
+    os: ["win32"],
+    cpu: ["x64"],
+  },
+];
 const maxArchiveEntry = 128 * 1024 * 1024;
 const publicationManifestName = "npm-publication-v1.json";
 const packageContracts = [
-  {
-    directory: "linux-x64",
-    name: "@planq-cli/linux-x64",
+  ...nativeTargets.map(({ directory, name, binary }) => ({
+    directory,
+    name,
     files: [
       "LICENSE",
-      "bin/planq",
+      `bin/${binary}`,
       "package.json",
       "planq-release-v1.json",
     ],
-  },
+  })),
   {
     directory: "planq",
     name: "@planq-cli/planq",
@@ -185,13 +215,17 @@ async function loadRelease(releaseDirectory) {
   return { root, manifest, artifacts };
 }
 
-function tarOutput(archive, entry) {
-  const result = spawnSync("tar", ["-xOf", archive, entry], {
+function archiveOutput(archive, entry) {
+  const [command, args] = archive.endsWith(".zip")
+    ? ["unzip", ["-p", archive, entry]]
+    : ["tar", ["-xOf", archive, entry]];
+  const result = spawnSync(command, args, {
     maxBuffer: maxArchiveEntry,
     windowsHide: true,
   });
   if (result.status !== 0) {
-    fail("could not read required Linux archive entry", {
+    fail("could not read required release archive entry", {
+      archive: path.basename(archive),
       entry,
       stderr: String(result.stderr),
     });
@@ -199,23 +233,38 @@ function tarOutput(archive, entry) {
   return result.stdout;
 }
 
-function validateTarPaths(archive) {
-  const result = spawnSync("tar", ["-tf", archive], {
+function validateArchivePaths(archive) {
+  const [command, args] = archive.endsWith(".zip")
+    ? ["unzip", ["-Z1", archive]]
+    : ["tar", ["-tf", archive]];
+  const result = spawnSync(command, args, {
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
     windowsHide: true,
   });
   if (result.status !== 0) {
-    fail("could not list Linux release archive", { stderr: result.stderr });
+    fail("could not list release archive", {
+      archive: path.basename(archive),
+      stderr: result.stderr,
+    });
   }
-  for (const entry of result.stdout.trim().split(/\r?\n/)) {
+  const entries = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+  if (entries.length === 0 || new Set(entries).size !== entries.length) {
+    fail("release archive entries are empty or duplicated", {
+      archive: path.basename(archive),
+    });
+  }
+  for (const entry of entries) {
     if (
-      !entry ||
       entry.startsWith("/") ||
+      entry.includes("\\") ||
       /^[A-Za-z]:/.test(entry) ||
       entry.split("/").includes("..")
     ) {
-      fail("Linux release archive contains an unsafe path", { entry });
+      fail("release archive contains an unsafe path", {
+        archive: path.basename(archive),
+        entry,
+      });
     }
   }
 }
@@ -325,7 +374,7 @@ async function packNpmPackages({
       sourceSnapshotSha256: release.manifest.sourceSnapshotSha256,
       manifestSha256: sha256(releaseManifest),
       skillDigest: release.manifest.skill.digest,
-      target: "linux-x86_64",
+      targets: nativeTargets.map(({ target }) => target),
     },
     packages,
   };
@@ -379,24 +428,48 @@ export async function prepareNpmPackages({
   }
 
   const version = release.manifest.productVersion;
-  const linux = release.artifacts.get("linux-x86_64");
-  const archive = path.join(release.root, linux.archive);
-  const archiveRoot = `planq-${version}-linux-x86_64`;
-  validateTarPaths(archive);
-  const binary = tarOutput(archive, `${archiveRoot}/bin/planq`);
-  const license = tarOutput(archive, `${archiveRoot}/LICENSE`);
-  const buildInfo = JSON.parse(
-    tarOutput(archive, `${archiveRoot}/build-info.json`).toString("utf8"),
-  );
-  if (
-    sha256(binary) !== linux.binarySha256 ||
-    license.length === 0 ||
-    buildInfo.productVersion !== version ||
-    buildInfo.sourceCommit !== release.manifest.sourceCommit ||
-    buildInfo.buildTarget !== "linux-x86_64" ||
-    buildInfo.skill?.digest !== release.manifest.skill?.digest
-  ) {
-    fail("Linux archive metadata does not match the release manifest");
+  const nativeContents = [];
+  let packageLicense = null;
+  for (const contract of nativeTargets) {
+    const artifact = release.artifacts.get(contract.target);
+    const archive = path.join(release.root, artifact.archive);
+    const archiveRoot = `planq-${version}-${contract.target}`;
+    validateArchivePaths(archive);
+    const binary = archiveOutput(
+      archive,
+      `${archiveRoot}/bin/${contract.binary}`,
+    );
+    const license = archiveOutput(archive, `${archiveRoot}/LICENSE`);
+    let buildInfo;
+    try {
+      buildInfo = JSON.parse(
+        archiveOutput(
+          archive,
+          `${archiveRoot}/build-info.json`,
+        ).toString("utf8"),
+      );
+    } catch {
+      fail("release archive build-info.json is invalid", {
+        target: contract.target,
+      });
+    }
+    if (
+      sha256(binary) !== artifact.binarySha256 ||
+      license.length === 0 ||
+      buildInfo.productVersion !== version ||
+      buildInfo.sourceCommit !== release.manifest.sourceCommit ||
+      buildInfo.buildTarget !== contract.target ||
+      buildInfo.skill?.digest !== release.manifest.skill?.digest
+    ) {
+      fail("release archive metadata does not match the release manifest", {
+        target: contract.target,
+      });
+    }
+    if (packageLicense && !packageLicense.equals(license)) {
+      fail("release archive LICENSE files do not match");
+    }
+    packageLicense ??= license;
+    nativeContents.push({ contract, binary, license });
   }
 
   const common = {
@@ -413,19 +486,9 @@ export async function prepareNpmPackages({
     bin: { planq: "bin/planq.js" },
     files: ["bin/planq.js", "README.md", "LICENSE"],
     engines: { node: ">=20" },
-    optionalDependencies: { "@planq-cli/linux-x64": version },
-  };
-  const native = {
-    name: "@planq-cli/linux-x64",
-    version,
-    description: "PlanQ native CLI for Linux glibc x86_64",
-    license: metadata.license,
-    homepage: metadata.homepage,
-    repository: { type: "git", url: metadata.repository },
-    os: ["linux"],
-    cpu: ["x64"],
-    libc: ["glibc"],
-    files: ["bin/planq", "LICENSE", "planq-release-v1.json"],
+    optionalDependencies: Object.fromEntries(
+      nativeTargets.map(({ name }) => [name, version]),
+    ),
   };
 
   const staging = `${output}.staging-${process.pid}`;
@@ -439,15 +502,42 @@ export async function prepareNpmPackages({
       await wrapperReadme(version, metadata.license),
     );
     await write(staging, "planq/bin/planq.js", await readFile(wrapperSource), 0o755);
-    await write(staging, "planq/LICENSE", license);
-    await write(staging, "linux-x64/package.json", packageJson(native));
-    await write(staging, "linux-x64/bin/planq", binary, 0o755);
-    await write(staging, "linux-x64/LICENSE", license);
-    await write(
-      staging,
-      "linux-x64/planq-release-v1.json",
-      `${JSON.stringify(release.manifest)}\n`,
-    );
+    await write(staging, "planq/LICENSE", packageLicense);
+    for (const { contract, binary, license } of nativeContents) {
+      const definition = {
+        name: contract.name,
+        version,
+        description: contract.description,
+        license: metadata.license,
+        homepage: metadata.homepage,
+        repository: { type: "git", url: metadata.repository },
+        os: contract.os,
+        cpu: contract.cpu,
+        ...(contract.libc ? { libc: contract.libc } : {}),
+        files: [
+          `bin/${contract.binary}`,
+          "LICENSE",
+          "planq-release-v1.json",
+        ],
+      };
+      await write(
+        staging,
+        `${contract.directory}/package.json`,
+        packageJson(definition),
+      );
+      await write(
+        staging,
+        `${contract.directory}/bin/${contract.binary}`,
+        binary,
+        contract.binary === "planq" ? 0o755 : 0o644,
+      );
+      await write(staging, `${contract.directory}/LICENSE`, license);
+      await write(
+        staging,
+        `${contract.directory}/planq-release-v1.json`,
+        `${JSON.stringify(release.manifest)}\n`,
+      );
+    }
     const publicationManifest = await packNpmPackages({
       staging,
       release,

@@ -29,7 +29,7 @@ env:
 
 jobs:
   prepare:
-    name: prepare / smoke
+    name: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -82,11 +82,6 @@ jobs:
           node scripts/prepare-npm.mjs \
             "$RUNNER_TEMP/release" \
             "$RUNNER_TEMP/publication"
-      - name: Smoke exact npm tarballs
-        run: |
-          node scripts/npm-release.mjs smoke \
-            --directory "$RUNNER_TEMP/publication" \
-            >"$RUNNER_TEMP/local-tarball-smoke-v1.json"
       - name: Run anonymous registry preflight
         run: |
           node scripts/npm-release.mjs preflight \
@@ -99,8 +94,8 @@ jobs:
           const [file, dryRun] = process.argv.slice(2);
           const result = JSON.parse(fs.readFileSync(file, "utf8"));
           const allowed = dryRun === "true"
-            ? ["new", "resume-wrapper", "existing", "legacy-no-provenance"]
-            : ["new", "resume-wrapper", "existing"];
+            ? ["new", "resume-native", "resume-wrapper", "existing", "legacy-no-provenance"]
+            : ["new", "resume-native", "resume-wrapper", "existing"];
           if (!allowed.includes(result.state)) {
             throw new Error(`unsafe npm registry state: ${result.state}`);
           }
@@ -112,7 +107,6 @@ jobs:
           mkdir "$RUNNER_TEMP/bundle"
           mv "$RUNNER_TEMP/publication" "$RUNNER_TEMP/bundle/publication"
           cp scripts/npm-release.mjs "$RUNNER_TEMP/bundle/npm-release.mjs"
-          cp "$RUNNER_TEMP/local-tarball-smoke-v1.json" "$RUNNER_TEMP/bundle/"
           cp "$RUNNER_TEMP/npm-preflight-v1.json" "$RUNNER_TEMP/bundle/"
       - name: Upload publication bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -127,8 +121,51 @@ jobs:
           name: npm-prepare-evidence-${{ steps.release.outputs.tag }}
           path: |
             ${{ runner.temp }}/bundle/publication/npm-publication-v1.json
-            ${{ runner.temp }}/bundle/local-tarball-smoke-v1.json
             ${{ runner.temp }}/bundle/npm-preflight-v1.json
+          if-no-files-found: error
+          retention-days: 90
+
+  smoke:
+    name: smoke / ${{ matrix.target }}
+    needs:
+      - prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: windows-x86_64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Download publication bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: npm-publication-${{ github.event.release.tag_name || inputs.tag }}
+          path: ${{ runner.temp }}/bundle
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install pinned npm
+        run: npm install --global "npm@${{ env.NPM_VERSION }}"
+      - name: Smoke exact platform tarballs
+        shell: bash
+        run: |
+          node "$RUNNER_TEMP/bundle/npm-release.mjs" smoke \
+            --directory "$RUNNER_TEMP/bundle/publication" \
+            >"$RUNNER_TEMP/npm-smoke-${{ matrix.target }}-v1.json"
+      - name: Upload platform smoke evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: npm-smoke-${{ matrix.target }}-${{ github.event.release.tag_name || inputs.tag }}
+          path: ${{ runner.temp }}/npm-smoke-${{ matrix.target }}-v1.json
           if-no-files-found: error
           retention-days: 90
 
@@ -136,6 +173,7 @@ jobs:
     name: publish / npm-production
     needs:
       - prepare
+      - smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm-production
@@ -177,12 +215,22 @@ jobs:
           retention-days: 30
 
   verify:
-    name: anonymous verify
+    name: anonymous verify / ${{ matrix.target }}
     needs:
       - prepare
       - publish
     if: needs.prepare.outputs.dry-run != 'true'
-    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            runner: macos-14
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+          - target: windows-x86_64
+            runner: windows-2022
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     permissions:
       contents: read
@@ -202,11 +250,11 @@ jobs:
         run: |
           node "$RUNNER_TEMP/bundle/npm-release.mjs" verify \
             --directory "$RUNNER_TEMP/bundle/publication" \
-            >"$RUNNER_TEMP/npm-publication-evidence-v1.json"
+            >"$RUNNER_TEMP/npm-publication-${{ matrix.target }}-evidence-v1.json"
       - name: Upload anonymous verification evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: npm-verify-${{ github.event.release.tag_name || inputs.tag }}
-          path: ${{ runner.temp }}/npm-publication-evidence-v1.json
+          name: npm-verify-${{ matrix.target }}-${{ github.event.release.tag_name || inputs.tag }}
+          path: ${{ runner.temp }}/npm-publication-${{ matrix.target }}-evidence-v1.json
           if-no-files-found: error
           retention-days: 90

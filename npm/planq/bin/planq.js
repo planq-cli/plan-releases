@@ -7,18 +7,27 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const nativePackage = "@planq-cli/linux-x64";
 const supportUrl = "https://planq.dev/docs/install";
-const forwardedSignals = ["SIGINT", "SIGTERM", "SIGHUP"];
+const packageTargets = {
+  "darwin-arm64": {
+    packageName: "@planq-cli/darwin-arm64",
+    binary: "planq",
+  },
+  "linux-x64-glibc": {
+    packageName: "@planq-cli/linux-x64",
+    binary: "planq",
+  },
+  "win32-x64": {
+    packageName: "@planq-cli/win32-x64",
+    binary: "planq.exe",
+  },
+};
 
 export const diagnostics = {
-  missing:
-    `PLANQ_NPM_NATIVE_PACKAGE_MISSING: ${nativePackage} is not installed. ` +
-    "Reinstall @planq-cli/planq without --no-optional.",
   musl:
-    `PLANQ_NPM_UNSUPPORTED_LIBC: PlanQ npm packages support Linux glibc x86_64 only. ${supportUrl}`,
+    `PLANQ_NPM_UNSUPPORTED_LIBC: PlanQ npm packages support Linux glibc x86_64, not musl. ${supportUrl}`,
   unsupported:
-    `PLANQ_NPM_UNSUPPORTED_PLATFORM: This npm package supports Linux glibc x86_64 only. ${supportUrl}`,
+    `PLANQ_NPM_UNSUPPORTED_PLATFORM: PlanQ npm supports macOS arm64, Linux glibc x86_64, and Windows x86_64. ${supportUrl}`,
 };
 
 export function glibcVersion(report = process.report) {
@@ -29,18 +38,35 @@ export function glibcVersion(report = process.report) {
   }
 }
 
-export function platformDiagnostic({ platform, arch, glibc }) {
-  if (platform !== "linux" || arch !== "x64") {
-    if (platform === "darwin") {
-      return `${diagnostics.unsupported} Use: brew install planq-cli/tap/planq`;
-    }
-    if (platform === "win32") {
-      return `${diagnostics.unsupported} Use: winget install --id PlanQ.PlanQ --exact`;
-    }
-    return diagnostics.unsupported;
+export function platformTarget({ platform, arch, glibc }) {
+  if (platform === "darwin" && arch === "arm64") {
+    return packageTargets["darwin-arm64"];
   }
-  if (!glibc) return diagnostics.musl;
+  if (platform === "linux" && arch === "x64") {
+    return glibc ? packageTargets["linux-x64-glibc"] : null;
+  }
+  if (platform === "win32" && arch === "x64") {
+    return packageTargets["win32-x64"];
+  }
   return null;
+}
+
+export function platformDiagnostic(runtime) {
+  if (
+    runtime.platform === "linux" &&
+    runtime.arch === "x64" &&
+    !runtime.glibc
+  ) {
+    return diagnostics.musl;
+  }
+  return platformTarget(runtime) ? null : diagnostics.unsupported;
+}
+
+export function missingDiagnostic(packageName) {
+  return (
+    `PLANQ_NPM_NATIVE_PACKAGE_MISSING: ${packageName} is not installed. ` +
+    "Reinstall @planq-cli/planq without --no-optional."
+  );
 }
 
 export function run(runtime) {
@@ -50,20 +76,21 @@ export function run(runtime) {
     runtime.exit(1);
     return null;
   }
+  const target = platformTarget(runtime);
 
   let packageJson;
   try {
-    packageJson = runtime.resolve(`${nativePackage}/package.json`);
+    packageJson = runtime.resolve(`${target.packageName}/package.json`);
   } catch {
-    runtime.stderr.write(`${diagnostics.missing}\n`);
+    runtime.stderr.write(`${missingDiagnostic(target.packageName)}\n`);
     runtime.exit(1);
     return null;
   }
 
-  const binary = path.join(path.dirname(packageJson), "bin", "planq");
+  const binary = path.join(path.dirname(packageJson), "bin", target.binary);
   if (!runtime.fileExists(binary)) {
     runtime.stderr.write(
-      `PLANQ_NPM_NATIVE_BINARY_MISSING: ${nativePackage} is incomplete. Reinstall the package.\n`,
+      `PLANQ_NPM_NATIVE_BINARY_MISSING: ${target.packageName} is incomplete. Reinstall the package.\n`,
     );
     runtime.exit(1);
     return null;
@@ -85,6 +112,10 @@ export function run(runtime) {
     callback();
   };
 
+  const forwardedSignals =
+    runtime.platform === "win32"
+      ? ["SIGINT", "SIGTERM"]
+      : ["SIGINT", "SIGTERM", "SIGHUP"];
   for (const signal of forwardedSignals) {
     const handler = () => {
       if (child.exitCode === null && child.signalCode === null) {
