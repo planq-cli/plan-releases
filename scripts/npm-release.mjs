@@ -125,6 +125,7 @@ function run(commandRunner, command, args, options, label) {
   const result = commandRunner(command, args, {
     ...options,
     encoding: "utf8",
+    ...(command === "npm.cmd" ? { shell: true } : {}),
     windowsHide: true,
   });
   if (result.status !== 0) {
@@ -183,6 +184,7 @@ export function assertToolchain({
   const result = commandRunner(npmExecutable(platform), ["--version"], {
     encoding: "utf8",
     env: cleanEnvironment(environment),
+    ...(platform === "win32" ? { shell: true } : {}),
     windowsHide: true,
   });
   const npmVersion = String(result.stdout ?? "").trim();
