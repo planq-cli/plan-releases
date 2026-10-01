@@ -104,6 +104,7 @@ export function validateNpmWorkflow(workflow) {
     [smoke, /name:\s*smoke \/ \$\{\{ matrix\.target \}\}/],
     [verify, /name:\s*anonymous verify \/ \$\{\{ matrix\.target \}\}/],
     [publish, /needs:\s*\n\s+- prepare\s*\n\s+- smoke/],
+    [publish, /if:\s*needs\.prepare\.outputs\.dry-run != 'true'/],
   ]) {
     if (!required.test(block)) {
       fail("npm workflow native matrix is incomplete", {
@@ -121,6 +122,7 @@ export function validateNpmWorkflow(workflow) {
   for (const required of [
     /scripts\/download-release\.mjs/,
     /scripts\/prepare-npm\.mjs/,
+    /\["new", "resume-native", "resume-wrapper", "existing", "legacy-no-provenance", "conflict"\]/,
     /npm-release\.mjs"? smoke/,
     /npm-release\.mjs"? publish/,
     /npm-release\.mjs"? verify/,

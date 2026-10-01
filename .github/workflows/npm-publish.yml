@@ -94,7 +94,7 @@ jobs:
           const [file, dryRun] = process.argv.slice(2);
           const result = JSON.parse(fs.readFileSync(file, "utf8"));
           const allowed = dryRun === "true"
-            ? ["new", "resume-native", "resume-wrapper", "existing", "legacy-no-provenance"]
+            ? ["new", "resume-native", "resume-wrapper", "existing", "legacy-no-provenance", "conflict"]
             : ["new", "resume-native", "resume-wrapper", "existing"];
           if (!allowed.includes(result.state)) {
             throw new Error(`unsafe npm registry state: ${result.state}`);
@@ -174,6 +174,7 @@ jobs:
     needs:
       - prepare
       - smoke
+    if: needs.prepare.outputs.dry-run != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm-production
