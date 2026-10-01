@@ -43,4 +43,4 @@ shasum -a 256 -c SHA256SUMS
 On Windows, use `Get-FileHash <archive> -Algorithm SHA256` and compare the
 result with both metadata files.
 
-PlanQ is licensed under `PolyForm-Noncommercial-1.0.0`. Current release: `0.1.3`.
+PlanQ is licensed under `PolyForm-Noncommercial-1.0.0`. Current release: `0.1.4`.
