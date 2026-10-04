@@ -3,12 +3,14 @@
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readdir,
   readlink,
+  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -66,6 +68,31 @@ function fail(message, details = {}) {
 
 function sha256(content) {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function alternateVersion(version) {
+  const index = version.search(/[0-9]/);
+  if (index < 0) fail("solver engine version has no numeric component");
+  const digit = version[index] === "9" ? "8" : "9";
+  return `${version.slice(0, index)}${digit}${version.slice(index + 1)}`;
+}
+
+function patchEmbeddedVersion(content, currentVersion) {
+  const replacement = alternateVersion(currentVersion);
+  const current = Buffer.from(currentVersion);
+  const next = Buffer.from(replacement);
+  const patched = Buffer.from(content);
+  let count = 0;
+  let offset = 0;
+  while ((offset = patched.indexOf(current, offset)) >= 0) {
+    next.copy(patched, offset);
+    offset += next.length;
+    count += 1;
+  }
+  if (count === 0) {
+    fail("solver binary does not embed its handshake version");
+  }
+  return { content: patched, version: replacement };
 }
 
 function exactKeys(value, keys, label) {
@@ -521,7 +548,7 @@ async function waitForDev(port, child) {
       const response = await fetch(`http://127.0.0.1:${port}/__plan/session`);
       if (response.ok) {
         const session = await response.json();
-        if (session.protocolVersion !== "1.2") {
+        if (session.protocolVersion !== "1.3") {
           fail("planq dev session protocol mismatch");
         }
         return;
@@ -574,6 +601,170 @@ function planqInvocation(binary, args) {
     : [binary, args];
 }
 
+async function npmSolverBundle(expectedTarget, env, commandRunner, root) {
+  const contract = nativeContracts.find(({ target }) => target === expectedTarget);
+  if (!contract) fail("npm smoke target has no native package contract");
+  const packageName = contract.name.split("/");
+  const packageRoots = [
+    globalPackageRoot(env.NPM_CONFIG_PREFIX),
+    path.join(
+      globalPackageRoot(env.NPM_CONFIG_PREFIX),
+      "@planq-cli",
+      "planq",
+      "node_modules",
+    ),
+  ];
+  let sidecar;
+  for (const packageRoot of packageRoots) {
+    const candidate = path.join(
+      packageRoot,
+      ...packageName,
+      "bin",
+      process.platform === "win32" ? "planq-solver.exe" : "planq-solver",
+    );
+    if (await lstat(candidate).catch(() => null)) {
+      sidecar = candidate;
+      break;
+    }
+  }
+  if (!sidecar) fail("installed npm solver could not be located");
+  const checksum = path.join(path.dirname(sidecar), "planq-solver.sha256");
+  const sidecarBytes = await readFile(sidecar);
+  const actualSha256 = sha256(sidecarBytes);
+  if ((await readFile(checksum, "utf8")).trim() !== `sha256:${actualSha256}`) {
+    fail("installed npm solver checksum does not match the sidecar");
+  }
+  const handshakeResult = commandRunner(sidecar, ["--version"], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (handshakeResult.status !== 0) {
+    fail("installed npm solver handshake failed");
+  }
+  const handshake = jsonOutput(
+    "planq-solver --version",
+    handshakeResult.stdout,
+  );
+  if (
+    handshake.requestVersion !== "1" ||
+    handshake.responseVersion !== "1" ||
+    typeof handshake.solverEngineVersion !== "string" ||
+    handshake.solverEngineVersion.length === 0
+  ) {
+    fail("installed npm solver handshake is invalid");
+  }
+  return {
+    sidecar,
+    checksum,
+    sidecarBytes,
+    handshake,
+    sidecarMode: (await lstat(sidecar)).mode,
+    checksumMode: (await lstat(checksum)).mode,
+  };
+}
+
+function assertSolved(label, result, now, solverEngineVersion) {
+  if (result.status !== 0) {
+    fail(`${label} failed`, {
+      status: result.status,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  }
+  const envelope = jsonOutput(label, result.stdout);
+  const schedule = envelope.result?.projection?.computedSchedules?.[0];
+  if (
+    envelope.ok !== true ||
+    envelope.command !== "solve" ||
+    envelope.result?.status !== "solved" ||
+    envelope.result?.now !== now ||
+    envelope.result?.solverEngineVersion !== solverEngineVersion ||
+    schedule?.kind !== "task" ||
+    schedule?.start !== now ||
+    schedule?.end !== now ||
+    JSON.stringify(schedule?.workDates) !== JSON.stringify([now])
+  ) {
+    fail(`${label} did not return the expected fixed-now schedule`);
+  }
+}
+
+function assertSolverFailure(label, result, stderrPattern = null) {
+  if (result.status === 0) fail(`${label} unexpectedly succeeded`);
+  if (
+    stderrPattern &&
+    !String(result.stdout ?? "").trim() &&
+    stderrPattern.test(String(result.stderr ?? ""))
+  ) {
+    return;
+  }
+  const envelope = jsonOutput(label, result.stdout);
+  if (
+    envelope.ok !== false ||
+    envelope.command !== "solve" ||
+    envelope.result?.status !== "unknown" ||
+    !envelope.result?.diagnostics?.some(
+      (diagnostic) => diagnostic.code === "solver/unknown",
+    ) ||
+    envelope.result?.projection?.computedSchedules?.length !== 0
+  ) {
+    fail(`${label} did not return a sanitized solver failure`);
+  }
+}
+
+async function verifySidecarFailures(bundle, invokeResult) {
+  const sidecarBackup = `${bundle.sidecar}.npm-smoke-backup-${process.pid}`;
+  await rename(bundle.sidecar, sidecarBackup);
+  try {
+    assertSolverFailure(
+      "solve with missing sidecar",
+      invokeResult(["solve", "project.plan", "--now", "2026-10-07"]),
+      /PLANQ_NPM_NATIVE_BINARY_MISSING/,
+    );
+  } finally {
+    await rename(sidecarBackup, bundle.sidecar);
+  }
+
+  const checksumBackup =
+    `${bundle.checksum}.npm-smoke-backup-${process.pid}`;
+  const patched = patchEmbeddedVersion(
+    bundle.sidecarBytes,
+    bundle.handshake.solverEngineVersion,
+  );
+  await rename(bundle.sidecar, sidecarBackup);
+  await rename(bundle.checksum, checksumBackup);
+  try {
+    await writeFile(bundle.sidecar, patched.content);
+    await chmod(bundle.sidecar, bundle.sidecarMode);
+    await writeFile(
+      bundle.checksum,
+      `sha256:${sha256(patched.content)}\n`,
+    );
+    await chmod(bundle.checksum, bundle.checksumMode);
+    const handshakeResult = spawnSync(bundle.sidecar, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    if (
+      handshakeResult.status !== 0 ||
+      jsonOutput("wrong-version solver handshake", handshakeResult.stdout)
+        .solverEngineVersion !== patched.version
+    ) {
+      fail("solver version patch did not change the handshake");
+    }
+    assertSolverFailure(
+      "solve with wrong-version sidecar",
+      invokeResult(["solve", "project.plan", "--now", "2026-10-08"]),
+    );
+  } finally {
+    await rm(bundle.sidecar, { force: true });
+    await rm(bundle.checksum, { force: true });
+    await rename(sidecarBackup, bundle.sidecar);
+    await rename(checksumBackup, bundle.checksum);
+  }
+}
+
 async function exercisePlanq({
   binary,
   expectedTarget,
@@ -612,6 +803,15 @@ async function exercisePlanq({
   }
   if (!includeFullSmoke) return;
 
+  const invokeResult = (args, environment = env) => {
+    const [command, commandArgs] = planqInvocation(binary, args);
+    return commandRunner(command, commandArgs, {
+      cwd: project,
+      env: environment,
+      encoding: "utf8",
+      windowsHide: true,
+    });
+  };
   const invoke = (args, label) => {
     const [command, commandArgs] = planqInvocation(binary, args);
     return run(commandRunner, command, commandArgs, {
@@ -654,6 +854,53 @@ async function exercisePlanq({
     ["project", "validate"],
   ]) {
     invoke(args, `planq ${args.join(" ")}`);
+  }
+
+  const bundle = await npmSolverBundle(
+    expectedTarget,
+    env,
+    commandRunner,
+    root,
+  );
+  const solverSource =
+    "{:version 1.0 :id npm-solver-smoke :title \"Npm Solver Smoke\" " +
+    ":now 2026-10-01 :items [" +
+    "{:id build :task Build :effort 1pd :to [@alice]}]}\n";
+  await writeFile(path.join(project, "project.plan"), solverSource);
+  await writeFile(
+    path.join(project, "resources.plan"),
+    "{:version 1.0 :people [{:id alice :name Alice :role Engineer}]}\n",
+  );
+  assertSolved(
+    "fixed-now solve",
+    invokeResult(["solve", "project.plan", "--now", "2026-10-05"]),
+    "2026-10-05",
+    bundle.handshake.solverEngineVersion,
+  );
+  const proxyPort = await unusedPort();
+  const offlineProxy = `http://127.0.0.1:${proxyPort}`;
+  assertSolved(
+    "offline solve",
+    invokeResult(
+      ["solve", "project.plan", "--now", "2026-10-06"],
+      {
+        ...env,
+        ALL_PROXY: offlineProxy,
+        HTTPS_PROXY: offlineProxy,
+        HTTP_PROXY: offlineProxy,
+        all_proxy: offlineProxy,
+        https_proxy: offlineProxy,
+        http_proxy: offlineProxy,
+        NO_PROXY: "",
+        no_proxy: "",
+      },
+    ),
+    "2026-10-06",
+    bundle.handshake.solverEngineVersion,
+  );
+  await verifySidecarFailures(bundle, invokeResult);
+  if (await readFile(path.join(project, "project.plan"), "utf8") !== solverSource) {
+    fail("npm solver smoke modified the source plan");
   }
 
   const port = await unusedPort();
@@ -894,12 +1141,18 @@ export async function smokeLocalTarballs({
         `global-${installed.commandKind}`,
         "platform-package-filter",
         "version",
+        "solver-handshake",
         "skill",
         "init",
         "validate",
         "normalize",
         "format",
         "project-validate",
+        "fixed-now-solve",
+        "offline-solve",
+        "missing-sidecar",
+        "wrong-version-sidecar",
+        "source-read-only",
         "dev-cleanup",
         "npx",
         "uninstall",
@@ -1035,7 +1288,7 @@ export async function verifyRegistryPublication({
       env,
       commandRunner,
       devRunner: spawn,
-      includeFullSmoke: false,
+      includeFullSmoke: true,
     });
     const npx = jsonOutput(
       "registry npx",
@@ -1097,6 +1350,19 @@ export async function verifyRegistryPublication({
         `global-${installed.commandKind}`,
         "platform-package-filter",
         "version",
+        "solver-handshake",
+        "skill",
+        "init",
+        "validate",
+        "normalize",
+        "format",
+        "project-validate",
+        "fixed-now-solve",
+        "offline-solve",
+        "missing-sidecar",
+        "wrong-version-sidecar",
+        "source-read-only",
+        "dev-cleanup",
         "npx",
         "uninstall",
       ],

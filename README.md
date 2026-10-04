@@ -14,7 +14,8 @@ npm install --global @planq-cli/planq
 planq version
 ```
 
-The current npm `latest`, `0.1.4`, is available on all three supported targets.
+The current npm `latest`, `0.1.5`, is available on all three supported
+targets.
 
 The installed PlanQ binary is native and does not require GraalVM, a JDK, or
 Clojure. Homebrew on macOS and winget on Windows remain optional native
@@ -41,4 +42,4 @@ shasum -a 256 -c SHA256SUMS
 On Windows, use `Get-FileHash <archive> -Algorithm SHA256` and compare the
 result with both metadata files.
 
-PlanQ is licensed under `PolyForm-Noncommercial-1.0.0`. Current release: `0.1.4`.
+PlanQ is licensed under `PolyForm-Noncommercial-1.0.0`. Current release: `0.1.5`.
