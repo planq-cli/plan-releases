@@ -35,6 +35,7 @@ const nativeTargets = [
     directory: "darwin-arm64",
     name: "@planq-cli/darwin-arm64",
     binary: "planq",
+    solver: "planq-solver",
     description: "PlanQ native CLI for macOS arm64",
     os: ["darwin"],
     cpu: ["arm64"],
@@ -44,6 +45,7 @@ const nativeTargets = [
     directory: "linux-x64",
     name: "@planq-cli/linux-x64",
     binary: "planq",
+    solver: "planq-solver",
     description: "PlanQ native CLI for Linux glibc x86_64",
     os: ["linux"],
     cpu: ["x64"],
@@ -54,6 +56,7 @@ const nativeTargets = [
     directory: "win32-x64",
     name: "@planq-cli/win32-x64",
     binary: "planq.exe",
+    solver: "planq-solver.exe",
     description: "PlanQ native CLI for Windows x86_64",
     os: ["win32"],
     cpu: ["x64"],
@@ -62,15 +65,18 @@ const nativeTargets = [
 const maxArchiveEntry = 128 * 1024 * 1024;
 const publicationManifestName = "npm-publication-v1.json";
 const packageContracts = [
-  ...nativeTargets.map(({ directory, name, binary }) => ({
+  ...nativeTargets.map(({ directory, name, binary, solver }) => ({
     directory,
     name,
     files: [
       "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
       `bin/${binary}`,
+      `bin/${solver}`,
+      "bin/planq-solver.sha256",
       "package.json",
       "planq-release-v1.json",
-    ],
+    ].sort(),
   })),
   {
     directory: "planq",
@@ -173,18 +179,31 @@ async function loadRelease(releaseDirectory) {
   for (const artifact of manifest.artifacts) {
     exactKeys(
       artifact,
-      ["target", "archive", "sha256", "binary", "binarySha256"],
+      [
+        "target",
+        "archive",
+        "sha256",
+        "binary",
+        "binarySha256",
+        "solver",
+        "solverSha256",
+      ],
       "release artifact",
     );
     const suffix = targets[artifact.target];
     const binary = artifact.target === "windows-x86_64" ? "planq.exe" : "planq";
+    const solver = artifact.target === "windows-x86_64"
+      ? "planq-solver.exe"
+      : "planq-solver";
     if (
       !suffix ||
       artifacts.has(artifact.target) ||
       artifact.archive !== `planq-${manifest.productVersion}-${suffix}` ||
       artifact.binary !== binary ||
+      artifact.solver !== solver ||
       !/^[0-9a-f]{64}$/.test(artifact.sha256) ||
-      !/^[0-9a-f]{64}$/.test(artifact.binarySha256)
+      !/^[0-9a-f]{64}$/.test(artifact.binarySha256) ||
+      !/^[0-9a-f]{64}$/.test(artifact.solverSha256)
     ) {
       fail("release artifact identity is invalid", { target: artifact.target });
     }
@@ -439,6 +458,18 @@ export async function prepareNpmPackages({
       archive,
       `${archiveRoot}/bin/${contract.binary}`,
     );
+    const solver = archiveOutput(
+      archive,
+      `${archiveRoot}/bin/${contract.solver}`,
+    );
+    const solverChecksum = archiveOutput(
+      archive,
+      `${archiveRoot}/bin/planq-solver.sha256`,
+    );
+    const solverNotices = archiveOutput(
+      archive,
+      `${archiveRoot}/THIRD_PARTY_NOTICES.md`,
+    );
     const license = archiveOutput(archive, `${archiveRoot}/LICENSE`);
     let buildInfo;
     try {
@@ -455,6 +486,10 @@ export async function prepareNpmPackages({
     }
     if (
       sha256(binary) !== artifact.binarySha256 ||
+      sha256(solver) !== artifact.solverSha256 ||
+      solverChecksum.toString("utf8") !==
+        `sha256:${artifact.solverSha256}\n` ||
+      solverNotices.length === 0 ||
       license.length === 0 ||
       buildInfo.productVersion !== version ||
       buildInfo.sourceCommit !== release.manifest.sourceCommit ||
@@ -469,7 +504,14 @@ export async function prepareNpmPackages({
       fail("release archive LICENSE files do not match");
     }
     packageLicense ??= license;
-    nativeContents.push({ contract, binary, license });
+    nativeContents.push({
+      contract,
+      binary,
+      solver,
+      solverChecksum,
+      solverNotices,
+      license,
+    });
   }
 
   const common = {
@@ -503,7 +545,14 @@ export async function prepareNpmPackages({
     );
     await write(staging, "planq/bin/planq.js", await readFile(wrapperSource), 0o755);
     await write(staging, "planq/LICENSE", packageLicense);
-    for (const { contract, binary, license } of nativeContents) {
+    for (const {
+      contract,
+      binary,
+      solver,
+      solverChecksum,
+      solverNotices,
+      license,
+    } of nativeContents) {
       const definition = {
         name: contract.name,
         version,
@@ -516,6 +565,9 @@ export async function prepareNpmPackages({
         ...(contract.libc ? { libc: contract.libc } : {}),
         files: [
           `bin/${contract.binary}`,
+          `bin/${contract.solver}`,
+          "bin/planq-solver.sha256",
+          "THIRD_PARTY_NOTICES.md",
           "LICENSE",
           "planq-release-v1.json",
         ],
@@ -530,6 +582,22 @@ export async function prepareNpmPackages({
         `${contract.directory}/bin/${contract.binary}`,
         binary,
         contract.binary === "planq" ? 0o755 : 0o644,
+      );
+      await write(
+        staging,
+        `${contract.directory}/bin/${contract.solver}`,
+        solver,
+        contract.solver === "planq-solver" ? 0o755 : 0o644,
+      );
+      await write(
+        staging,
+        `${contract.directory}/bin/planq-solver.sha256`,
+        solverChecksum,
+      );
+      await write(
+        staging,
+        `${contract.directory}/THIRD_PARTY_NOTICES.md`,
+        solverNotices,
       );
       await write(staging, `${contract.directory}/LICENSE`, license);
       await write(

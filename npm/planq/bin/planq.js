@@ -12,14 +12,17 @@ const packageTargets = {
   "darwin-arm64": {
     packageName: "@planq-cli/darwin-arm64",
     binary: "planq",
+    solver: "planq-solver",
   },
   "linux-x64-glibc": {
     packageName: "@planq-cli/linux-x64",
     binary: "planq",
+    solver: "planq-solver",
   },
   "win32-x64": {
     packageName: "@planq-cli/win32-x64",
     binary: "planq.exe",
+    solver: "planq-solver.exe",
   },
 };
 
@@ -88,7 +91,17 @@ export function run(runtime) {
   }
 
   const binary = path.join(path.dirname(packageJson), "bin", target.binary);
-  if (!runtime.fileExists(binary)) {
+  const solver = path.join(path.dirname(packageJson), "bin", target.solver);
+  const solverChecksum = path.join(
+    path.dirname(packageJson),
+    "bin",
+    "planq-solver.sha256",
+  );
+  if (
+    !runtime.fileExists(binary) ||
+    !runtime.fileExists(solver) ||
+    !runtime.fileExists(solverChecksum)
+  ) {
     runtime.stderr.write(
       `PLANQ_NPM_NATIVE_BINARY_MISSING: ${target.packageName} is incomplete. Reinstall the package.\n`,
     );
