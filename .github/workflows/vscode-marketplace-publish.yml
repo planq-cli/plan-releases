@@ -1,0 +1,195 @@
+name: vscode-marketplace-publish
+run-name: marketplace / ${{ github.event.client_payload.tag || inputs.tag }}
+
+on:
+  repository_dispatch:
+    types: [vscode-marketplace-publish]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing formal Release tag (v0.1.6 or higher)
+        required: true
+        type: string
+      dry_run:
+        description: Anonymous prepare only; does not validate WIF
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: marketplace-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "22.14.0"
+  VSCE_VERSION: "3.6.0"
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      dry-run: ${{ steps.resolve.outputs.dry-run }}
+      state: ${{ steps.prepare.outputs.state }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Resolve approved entry point
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          WORKFLOW_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$WORKFLOW_REF" == "refs/heads/$DEFAULT_BRANCH" ]]
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          dry_run="false"
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            dry_run="$INPUT_DRY_RUN"
+          fi
+          printf 'tag=%s\ndry-run=%s\n' "$TAG" "$dry_run" >>"$GITHUB_OUTPUT"
+      - name: Prepare immutable Release VSIX and anonymous state
+        id: prepare
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+          EVENT_NAME: ${{ github.event_name }}
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "repository_dispatch" ]]; then
+            EXPECTED_CANDIDATE="$(node --input-type=module -e '
+              const p = JSON.parse(process.env.PAYLOAD);
+              const fields = ["sourceCommit", "releaseUrl", "assetName", "sha256"];
+              if (fields.some(k => typeof p[k] !== "string")) throw Error("missing dispatch candidate");
+              console.log(JSON.stringify(Object.fromEntries(fields.map(k => [k, p[k]]))));
+            ')"
+            export EXPECTED_CANDIDATE
+          fi
+          node scripts/marketplace-release.mjs prepare "$RUNNER_TEMP/bundle" "$TAG"
+          cp scripts/marketplace-release.mjs scripts/inspect-vsix.py "$RUNNER_TEMP/bundle/"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const p = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/bundle/prepare-v1.json"));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "state=" + p.state + "\n");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: marketplace-bundle-${{ steps.resolve.outputs.tag }}
+          path: ${{ runner.temp }}/bundle
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: marketplace-prepare-${{ steps.resolve.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/bundle/prepare-v1.json
+            ${{ runner.temp }}/bundle/operation-failure-v1.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  publish:
+    needs: [prepare]
+    outputs:
+      action: ${{ steps.publish.outputs.action }}
+    if: needs.prepare.outputs.state == 'new' && needs.prepare.outputs.dry-run == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: vscode-marketplace-production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: marketplace-bundle-${{ needs.prepare.outputs.tag }}
+          path: ${{ runner.temp }}/bundle
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install verified publication tool
+        run: |
+          npm install --global "@vscode/vsce@${VSCE_VERSION}"
+          vsce publish --help | grep -- --azure-credential
+          vsce publish --help | grep -- --packagePath
+      - uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ vars.MARKETPLACE_AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.MARKETPLACE_AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.MARKETPLACE_AZURE_SUBSCRIPTION_ID }}
+      - name: Recheck registry and publish exact bundle
+        id: publish
+        run: |
+          node "$RUNNER_TEMP/bundle/marketplace-release.mjs" publish "$RUNNER_TEMP/bundle" >"$RUNNER_TEMP/publish-v1.json"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const p = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/publish-v1.json"));
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "action=" + p.action + "\n");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: marketplace-publish-${{ needs.prepare.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/publish-v1.json
+            ${{ runner.temp }}/bundle/operation-failure-v1.json
+          if-no-files-found: ignore
+          retention-days: 90
+
+  verify:
+    needs: [prepare, publish]
+    if: always() && needs.prepare.result == 'success' && (needs.prepare.outputs.state == 'existing' || (needs.prepare.outputs.dry-run == 'false' && needs.publish.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: marketplace-bundle-${{ needs.prepare.outputs.tag }}
+          path: ${{ runner.temp }}/bundle
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify anonymous exact version and digest
+        env:
+          PREPARE_STATE: ${{ needs.prepare.outputs.state }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          PUBLISH_ACTION: ${{ needs.publish.outputs.action }}
+          DRY_RUN: ${{ needs.prepare.outputs.dry-run }}
+        run: |
+          node "$RUNNER_TEMP/bundle/marketplace-release.mjs" verify "$RUNNER_TEMP/bundle" >"$RUNNER_TEMP/registry-v1.json"
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const p = JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP + "/registry-v1.json"));
+            const evidence = {...p, workflow: "vscode-marketplace-publish.yml",
+              runId: process.env.GITHUB_RUN_ID, runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+              runUrl: "https://github.com/planq-cli/plan-releases/actions/runs/" + process.env.GITHUB_RUN_ID,
+              prepareState: process.env.PREPARE_STATE, dryRun: process.env.DRY_RUN === "true",
+              environment: process.env.PUBLISH_RESULT === "success" ? "approved" : "skipped",
+              publicationAction: process.env.PUBLISH_ACTION || "skipped",
+              wifPublication: process.env.PUBLISH_ACTION === "published",
+              smoke: "private-controller-required"};
+            fs.writeFileSync(process.env.RUNNER_TEMP + "/marketplace-evidence-v1.json", JSON.stringify(evidence) + "\n");
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, p.extensionId + "@" + p.version + ": " + p.state + "\nSHA-256: " + p.publicSha256 + "\n");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: marketplace-verify-${{ needs.prepare.outputs.tag }}
+          path: |
+            ${{ runner.temp }}/marketplace-evidence-v1.json
+            ${{ runner.temp }}/bundle/operation-failure-v1.json
+          if-no-files-found: ignore
+          retention-days: 90

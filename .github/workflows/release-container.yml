@@ -24,3 +24,6 @@ jobs:
           node --check scripts/npm-release.mjs
           node --check scripts/validate-repository.mjs
           node --check npm/planq/bin/planq.js
+          node --check scripts/marketplace-release.mjs
+      - name: Test Marketplace publication and recovery
+        run: node --test scripts/test/marketplace-release.test.mjs
