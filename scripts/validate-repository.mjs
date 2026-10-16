@@ -227,11 +227,11 @@ export function validateMarketplaceWorkflow(workflow) {
   };
   const actions = [...workflow.matchAll(/uses:\s*([^@\s]+)@([^\s#]+)/g)];
   if (actions.some(([, name, ref]) => pins[name] !== ref)) fail("Marketplace Action pin invalid");
-  for (const [field, variable] of [
-    ["client-id", "CLIENT"], ["tenant-id", "TENANT"], ["subscription-id", "SUBSCRIPTION"],
-  ]) {
+  for (const [field, variable] of [["client-id", "CLIENT"], ["tenant-id", "TENANT"]]) {
     if (!publish.includes(`${field}: \${{ vars.MARKETPLACE_AZURE_${variable}_ID }}`)) fail("Marketplace federated configuration source invalid");
   }
+  if (!publish.includes("allow-no-subscriptions: true") ||
+      publish.includes("subscription-id:")) fail("Marketplace identity must not require Azure resource access");
   for (const required of [
     'NODE_VERSION: "22.14.0"', 'VSCE_VERSION: "3.6.0"',
     "retention-days: 7", "retention-days: 90",

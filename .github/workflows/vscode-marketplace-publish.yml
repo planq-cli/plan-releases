@@ -127,7 +127,7 @@ jobs:
         with:
           client-id: ${{ vars.MARKETPLACE_AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.MARKETPLACE_AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.MARKETPLACE_AZURE_SUBSCRIPTION_ID }}
+          allow-no-subscriptions: true
       - name: Recheck registry and publish exact bundle
         id: publish
         run: |
