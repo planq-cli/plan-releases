@@ -10,6 +10,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const allowedPaths = new Set([
   ".github/workflows/npm-publish.yml",
   ".github/workflows/release-container.yml",
+  ".github/workflows/vscode-marketplace-publish.yml",
   "README.md",
   "npm/planq/README.md.template",
   "npm/planq/bin/planq.js",
@@ -17,6 +18,9 @@ const allowedPaths = new Set([
   "scripts/download-release.mjs",
   "scripts/npm-release.mjs",
   "scripts/prepare-npm.mjs",
+  "scripts/marketplace-release.mjs",
+  "scripts/inspect-vsix.py",
+  "scripts/test/marketplace-release.test.mjs",
   "scripts/validate-repository.mjs",
 ]);
 
@@ -157,7 +161,7 @@ export async function validateRepository({
     (file) =>
       file.startsWith(".github/workflows/") &&
       /(?:npm|publish)/i.test(path.basename(file)) &&
-      file !== ".github/workflows/npm-publish.yml",
+      ![".github/workflows/npm-publish.yml", ".github/workflows/vscode-marketplace-publish.yml"].includes(file),
   );
   if (publicationWorkflows.length > 0) {
     fail("unexpected publication workflow exists", {
@@ -170,8 +174,75 @@ export async function validateRepository({
   );
   return {
     ...validateNpmWorkflow(workflow),
+    marketplace: validateMarketplaceWorkflow(await readFile(
+      path.join(root, ".github/workflows/vscode-marketplace-publish.yml"), "utf8",
+    )),
+    marketplaceTooling: validateMarketplaceTooling(await readFile(
+      path.join(root, "scripts/marketplace-release.mjs"), "utf8",
+    )),
     trackedFiles: files,
   };
+}
+
+export function validateMarketplaceTooling(script) {
+  if (!/commandRunner\("vsce", \[\s*"publish", "--packagePath", [^\n]+, "--azure-credential",\s*\]/.test(script) ||
+      /--pat|--oidc|client-secret|VSCE_PAT|AZURE_CREDENTIALS|process\.env\.(?:AZURE|MARKETPLACE)/.test(script) ||
+      !/const state = await preflight\(candidate/.test(script) ||
+      !/if \(state.state === "existing"\) return/.test(script)) fail("Marketplace publication command boundary invalid");
+  return { identity: "entra-federation", extensionId: "planq-cli.planq" };
+}
+
+export function validateMarketplaceWorkflow(workflow) {
+  const prepare = jobBlock(workflow, "prepare", "publish");
+  const publish = jobBlock(workflow, "publish", "verify");
+  const verify = jobBlock(workflow, "verify");
+  const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([\w-]+):/gm)].map((match) => match[1]);
+  if (JSON.stringify(jobs) !== JSON.stringify(["prepare", "publish", "verify"])) fail("Marketplace job topology invalid");
+  if (!/\n  repository_dispatch:\n    types: \[vscode-marketplace-publish\]/.test(workflow) ||
+      !/\n  workflow_dispatch:\n/.test(workflow) ||
+      /\n  (?:release|pull_request|push):/.test(workflow)) fail("Marketplace triggers invalid");
+  if (!/default: true\s+type: boolean/.test(workflow) ||
+      !/\npermissions:\n  contents: read\n/.test(workflow) ||
+      !/group: marketplace-\$\{\{ github.event.client_payload.tag \|\| inputs.tag \}\}/.test(workflow) ||
+      !/cancel-in-progress: false/.test(workflow) ||
+      !/WORKFLOW_REF" == "refs\/heads\/\$DEFAULT_BRANCH/.test(prepare)) fail("Marketplace global controls invalid");
+  if (/id-token:\s*write|^    environment:|azure\/login@/m.test(prepare + verify) ||
+      !/environment: vscode-marketplace-production/.test(publish) ||
+      !/permissions:\n      contents: read\n      id-token: write/.test(publish) ||
+      (workflow.match(/id-token:/g) ?? []).length !== 1 ||
+      !/if: needs.prepare.outputs.state == 'new' && needs.prepare.outputs.dry-run == 'false'/.test(publish)) fail("Marketplace OIDC boundary invalid");
+  if (/actions\/checkout@/.test(publish + verify)) fail("Marketplace publish/verify must not check out repository content");
+  const permissions = [...workflow.matchAll(/^([ ]*)permissions:\n((?:\1  [\w-]+: [^\n]+\n)+)/gm)];
+  for (const [, , block] of permissions) {
+    const lines = block.trim().split("\n").map((line) => line.trim());
+    if (lines.some((line) => !["contents: read", "id-token: write"].includes(line))) fail("Marketplace excessive permissions");
+  }
+  if (/secrets\.|client[-_]secret|(?:VSCE|AZURE|MARKETPLACE)_PAT|AZURE_CREDENTIALS|CLIENT_CERTIFICATE|PRIVATE_KEY|--pat|--oidc/i.test(workflow)) fail("Marketplace must use Entra federation only");
+  const pins = {
+    "actions/checkout": "11bd71901bbe5b1630ceea73d27597364c9af683",
+    "actions/setup-node": "49933ea5288caeca8642d1e84afbd3f7d6820020",
+    "actions/download-artifact": "d3f86a106a0bac45b974a628896c90dbdf5c8093",
+    "actions/upload-artifact": "ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "azure/login": "a457da9ea143d694b1b9c7c869ebb04ebe844ef5",
+  };
+  const actions = [...workflow.matchAll(/uses:\s*([^@\s]+)@([^\s#]+)/g)];
+  if (actions.some(([, name, ref]) => pins[name] !== ref)) fail("Marketplace Action pin invalid");
+  for (const [field, variable] of [
+    ["client-id", "CLIENT"], ["tenant-id", "TENANT"], ["subscription-id", "SUBSCRIPTION"],
+  ]) {
+    if (!publish.includes(`${field}: \${{ vars.MARKETPLACE_AZURE_${variable}_ID }}`)) fail("Marketplace federated configuration source invalid");
+  }
+  for (const required of [
+    'NODE_VERSION: "22.14.0"', 'VSCE_VERSION: "3.6.0"',
+    "retention-days: 7", "retention-days: 90",
+    "scripts/inspect-vsix.py", "marketplace-release.mjs prepare",
+    'marketplace-release.mjs" publish', 'marketplace-release.mjs" verify',
+    "vsce publish --help | grep -- --azure-credential",
+    "vsce publish --help | grep -- --packagePath",
+    "always() && needs.prepare.result == 'success'",
+    "needs.prepare.outputs.state == 'existing'",
+  ]) if (!workflow.includes(required)) fail("Marketplace required control missing");
+  return { schemaVersion: "1", jobs: ["prepare", "publish", "verify"] };
 }
 
 if (
