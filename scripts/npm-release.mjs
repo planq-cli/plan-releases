@@ -949,7 +949,16 @@ async function exercisePlanq({
     if (error.code === "ENOENT") return null;
     throw error;
   });
-  if (stale) fail("planq dev left a stale discovery file");
+  if (stale && process.platform === "win32") {
+    // Node/libuv forcibly terminates Windows children; verify CLI stale-session recovery.
+    const reopened = invokeResult(["open"]);
+    if (reopened.status !== 2 || reopened.stdout.trim() !== "") {
+      fail("planq open accepted a forcibly terminated Windows session");
+    }
+    const remaining = await lstat(path.join(project, ".plan-dev-session.json"))
+      .catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+    if (remaining) fail("planq open did not clean the forcibly terminated session");
+  } else if (stale) fail("planq dev left a stale discovery file");
 }
 
 function currentNativeContract() {
