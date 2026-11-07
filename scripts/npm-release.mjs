@@ -862,14 +862,39 @@ async function exercisePlanq({
     commandRunner,
     root,
   );
-  const solverSource =
-    "{:version 1.0 :id npm-solver-smoke :title \"Npm Solver Smoke\" " +
-    ":now 2026-10-01 :items [" +
-    "{:id build :task Build :effort 1pd :to [@alice]}]}\n";
+  const solverSource = [
+    "{",
+    "  :version 1.0",
+    "  :id npm-solver-smoke",
+    '  :title "Npm Solver Smoke"',
+    "  :now 2026-10-01",
+    "  :items [",
+    "    {",
+    "      :id build",
+    "      :task Build",
+    "      :effort 1pd",
+    "      :to [@alice]",
+    "    }",
+    "  ]",
+    "}",
+    "",
+  ].join("\n");
   await writeFile(path.join(project, "project.plan"), solverSource);
   await writeFile(
     path.join(project, "resources.plan"),
-    "{:version 1.0 :people [{:id alice :name Alice :role Engineer}]}\n",
+    [
+      "{",
+      "  :version 1.0",
+      "  :people [",
+      "    {",
+      "      :id alice",
+      "      :name Alice",
+      "      :role Engineer",
+      "    }",
+      "  ]",
+      "}",
+      "",
+    ].join("\n"),
   );
   assertSolved(
     "fixed-now solve",
