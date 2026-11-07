@@ -134,7 +134,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
           - target: linux-x86_64
             runner: ubuntu-24.04
           - target: windows-x86_64
@@ -226,7 +226,7 @@ jobs:
       matrix:
         include:
           - target: darwin-arm64
-            runner: macos-14
+            runner: macos-15
           - target: linux-x86_64
             runner: ubuntu-24.04
           - target: windows-x86_64

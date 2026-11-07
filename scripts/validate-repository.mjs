@@ -93,7 +93,7 @@ export function validateNpmWorkflow(workflow) {
   }
   for (const block of [smoke, verify]) {
     for (const required of [
-      /target:\s*darwin-arm64\s+runner:\s*macos-14/,
+      /target:\s*darwin-arm64\s+runner:\s*macos-15/,
       /target:\s*linux-x86_64\s+runner:\s*ubuntu-24\.04/,
       /target:\s*windows-x86_64\s+runner:\s*windows-2022/,
     ]) {
